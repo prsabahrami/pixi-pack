@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    io::Cursor,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{anyhow, Result};
 use futures::{
@@ -16,7 +19,9 @@ use rattler_shell::{
     activation::{ActivationVariables, Activator, PathModificationBehavior},
     shell::{Shell, ShellEnum},
 };
+
 use tokio::fs;
+use tokio::io::AsyncReadExt;
 use tokio_stream::wrappers::ReadDirStream;
 use tokio_tar::Archive;
 use url::Url;
@@ -36,23 +41,29 @@ pub struct UnpackOptions {
 
 /// Unpack a pixi environment.
 pub async fn unpack(options: UnpackOptions) -> Result<()> {
-    let unpack_dir = tempfile::tempdir()
-        .map_err(|e| anyhow!("Could not create temporary directory: {}", e))?
-        .into_path();
-
-    let channel_directory = unpack_dir.join(CHANNEL_DIRECTORY_NAME);
+    let tmp_dir =
+        tempfile::tempdir().map_err(|e| anyhow!("Could not create temporary directory: {}", e))?;
+    let unpack_dir = tmp_dir.path();
 
     tracing::info!("Unarchiving pack to {}", unpack_dir.display());
-    unarchive(&options.pack_file, &unpack_dir)
-        .await
-        .map_err(|e| anyhow!("Could not unarchive: {}", e))?;
+    if options.pack_file.extension().unwrap_or_default() == "sh" {
+        unarchive_from_shellscript(&options.pack_file, unpack_dir)
+            .await
+            .map_err(|e| anyhow!("Could not extract archive from shell script: {}", e))?;
+    } else {
+        unarchive(&options.pack_file, unpack_dir)
+            .await
+            .map_err(|e| anyhow!("Could not unarchive: {}", e))?;
+    }
 
     validate_metadata_file(unpack_dir.join(PIXI_PACK_METADATA_PATH)).await?;
 
     let target_prefix = options.output_directory.join("env");
 
     tracing::info!("Creating prefix at {}", target_prefix.display());
-    create_prefix(&channel_directory, &target_prefix)
+    let channel_directory = unpack_dir.join(CHANNEL_DIRECTORY_NAME);
+    let cache_dir = unpack_dir.join("cache");
+    create_prefix(&channel_directory, &target_prefix, &cache_dir)
         .await
         .map_err(|e| anyhow!("Could not create prefix: {}", e))?;
 
@@ -73,6 +84,10 @@ pub async fn unpack(options: UnpackOptions) -> Result<()> {
         "💫 Finished unpacking to {}.",
         options.output_directory.display()
     );
+
+    tmp_dir
+        .close()
+        .map_err(|e| anyhow!("Could not remove temporary directory: {}", e))?;
 
     Ok(())
 }
@@ -142,6 +157,45 @@ async fn collect_packages(channel_dir: &Path) -> Result<FxHashMap<String, Packag
     Ok(packages)
 }
 
+// Extract the archive from a shell script and unar
+pub async fn unarchive_from_shellscript(shell_script_path: &Path, target_dir: &Path) -> Result<()> {
+    let mut shell_script = fs::File::open(shell_script_path)
+        .await
+        .map_err(|e| anyhow!("could not open shell script: {}", e))?;
+
+    let mut content = Vec::new();
+    shell_script
+        .read_to_end(&mut content)
+        .await
+        .map_err(|e| anyhow!("could not read shell script: {}", e))?;
+
+    let end_header = b"@@END_HEADER@@\n";
+    let end_archive = b"@@END_ARCHIVE@@\n";
+
+    let start = content
+        .windows(end_header.len())
+        .position(|window| window == end_header)
+        .map(|pos| pos + end_header.len())
+        .ok_or_else(|| anyhow!("Could not find @@END_HEADER@@ in shell script"))?;
+
+    let end = content
+        .windows(end_archive.len())
+        .position(|window| window == end_archive)
+        .ok_or_else(|| anyhow!("Could not find @@END_ARCHIVE@@ in shell script"))?;
+
+    let archive_content = &content[start..end];
+
+    let reader = tokio::io::BufReader::new(Cursor::new(archive_content));
+    let mut archive = Archive::new(reader);
+
+    archive
+        .unpack(target_dir)
+        .await
+        .map_err(|e| anyhow!("could not unpack archive: {}", e))?;
+
+    Ok(())
+}
+
 /// Unarchive a tarball.
 pub async fn unarchive(archive_path: &Path, target_dir: &Path) -> Result<()> {
     let file = fs::File::open(archive_path)
@@ -159,18 +213,15 @@ pub async fn unarchive(archive_path: &Path, target_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn create_prefix(channel_dir: &Path, target_prefix: &Path) -> Result<()> {
+async fn create_prefix(channel_dir: &Path, target_prefix: &Path, cache_dir: &Path) -> Result<()> {
     let packages = collect_packages(channel_dir)
         .await
         .map_err(|e| anyhow!("could not collect packages: {}", e))?;
 
-    let cache_dir = tempfile::tempdir()
-        .map_err(|e| anyhow!("could not create temporary directory: {}", e))?
-        .into_path();
-
     eprintln!(
-        "⏳ Extracting and installing {} packages...",
-        packages.len()
+        "⏳ Extracting and installing {} packages to {}...",
+        packages.len(),
+        cache_dir.display()
     );
     let reporter = ProgressReporter::new(packages.len() as u64);
 
