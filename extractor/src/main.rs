@@ -176,6 +176,7 @@ async fn create_prefix(channel_dir: &Path, target_prefix: &Path) -> Result<()> {
                     .get_or_fetch(
                         cache_key,
                         |destination| async move {
+                            let package_path = package_path.clone();
                             extract(&package_path, &destination).map(|_| ())
                         },
                         None,
