@@ -143,11 +143,12 @@ async fn create_prefix(channel_dir: &Path, target_prefix: &Path, cache_dir: &Pat
         .map_err(|e| anyhow!("could not collect packages: {}", e))?;
 
     eprintln!(
-        "⏳ Extracting and installing {} packages...",
-        packages.len()
+        "⏳ Extracting and installing {} packages to {}...",
+        packages.len(),
+        cache_dir.display()
     );
-
     // extract packages to cache
+    tracing::info!("Creating cache with {} packages", packages.len());
     let package_cache = PackageCache::new(cache_dir);
 
     let repodata_records: Vec<RepoDataRecord> = stream::iter(packages)
@@ -165,24 +166,28 @@ async fn create_prefix(channel_dir: &Path, target_prefix: &Path, cache_dir: &Pat
                 channel: "local".to_string(),
             };
 
-            {
-                let value = package_cache.clone();
-                async move {
-                    // Clone package_path before moving it into the closure
-                    let package_path = package_path.clone();
-                    value
+            async {
+                // We have to prepare the package cache by inserting all packages into it.
+                // We can only do so by calling `get_or_fetch` on each package, which will
+                // use the provided closure to fetch the package and insert it into the cache.
+                package_cache
                         .get_or_fetch(
                             cache_key,
-                            move |destination| async move {
+                            |destination| async move {
                                 extract(&package_path, &destination).map(|_| ())
                             },
                             None,
                         )
                         .await
-                        .map_err(|e| anyhow!("could not extract package: {}", e))?;
+                        .map_err(|e| {
+                            anyhow!(
+                                "could not extract \"{}\": {}",
+                                repodata_record.as_ref().name.as_source(),
+                                e
+                            )
+                        })?;
 
-                    Ok::<RepoDataRecord, anyhow::Error>(repodata_record)
-                }
+                Ok::<RepoDataRecord, anyhow::Error>(repodata_record)
             }
         })
         .buffer_unordered(50)
@@ -190,6 +195,7 @@ async fn create_prefix(channel_dir: &Path, target_prefix: &Path, cache_dir: &Pat
         .await?;
 
     // Invariant: all packages are in the cache
+    tracing::info!("Installing {} packages", repodata_records.len());
     let installer = Installer::default();
     installer
         .with_package_cache(package_cache)
@@ -203,8 +209,8 @@ async fn create_prefix(channel_dir: &Path, target_prefix: &Path, cache_dir: &Pat
         history_path,
         "// not relevant for pixi but for `conda run -p`",
     )
-    .await
-    .map_err(|e| anyhow!("Could not write history file: {}", e))?;
+    .map_err(|e| anyhow!("Could not write history file: {}", e))
+    .await?;
 
     Ok(())
 }
