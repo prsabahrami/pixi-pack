@@ -148,7 +148,6 @@ async fn create_prefix(channel_dir: &Path, target_prefix: &Path, cache_dir: &Pat
         cache_dir.display()
     );
     // extract packages to cache
-    tracing::info!("Creating cache with {} packages", packages.len());
     let package_cache = PackageCache::new(cache_dir);
 
     let repodata_records: Vec<RepoDataRecord> = stream::iter(packages)
@@ -195,7 +194,6 @@ async fn create_prefix(channel_dir: &Path, target_prefix: &Path, cache_dir: &Pat
         .await?;
 
     // Invariant: all packages are in the cache
-    tracing::info!("Installing {} packages", repodata_records.len());
     let installer = Installer::default();
     installer
         .with_package_cache(package_cache)
