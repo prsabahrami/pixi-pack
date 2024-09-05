@@ -6,7 +6,7 @@ use tokio_stream::wrappers::ReadDirStream;
 
 use anyhow::anyhow;
 use anyhow::Result;
-use futures::{stream, StreamExt, TryStreamExt};
+use futures::{stream, StreamExt, TryFutureExt, TryStreamExt};
 use rattler::{
     install::Installer,
     package_cache::{CacheKey, PackageCache},
@@ -65,7 +65,7 @@ pub async fn unpack(archive_dir: &Path, output_dir: &Path) -> Result<()> {
     validate_metadata_file(archive_dir.join(std::env::var("PIXI_PACK_METADATA_PATH").unwrap()))
         .await?;
 
-    create_prefix(&channel_directory, &output_dir, &cache_dir)
+    create_prefix(&channel_directory, output_dir, &cache_dir)
         .await
         .map_err(|e| anyhow!("Could not create prefix: {}", e))?;
 
