@@ -168,23 +168,24 @@ async fn create_prefix(channel_dir: &Path, target_prefix: &Path) -> Result<()> {
                 channel: "local".to_string(),
             };
 
-            async {
-                // We have to prepare the package cache by inserting all packages into it.
-                // We can only do so by calling `get_or_fetch` on each package, which will
-                // use the provided closure to fetch the package and insert it into the cache.
-                package_cache
-                    .get_or_fetch(
-                        cache_key,
-                        |destination| {
-                            let value = package_path.clone();
-                            async move { extract(&value, &destination).map(|_| ()) }
-                        },
-                        None,
-                    )
-                    .await
-                    .map_err(|e| anyhow!("could not extract package: {}", e))?;
+            {
+                let value = package_cache.clone();
+                async move {
+                    // Clone package_path before moving it into the closure
+                    let package_path = package_path.clone();
+                    value
+                        .get_or_fetch(
+                            cache_key,
+                            move |destination| async move {
+                                extract(&package_path, &destination).map(|_| ())
+                            },
+                            None,
+                        )
+                        .await
+                        .map_err(|e| anyhow!("could not extract package: {}", e))?;
 
-                Ok::<RepoDataRecord, anyhow::Error>(repodata_record)
+                    Ok::<RepoDataRecord, anyhow::Error>(repodata_record)
+                }
             }
         })
         .buffer_unordered(50)
